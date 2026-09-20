@@ -1,0 +1,9 @@
+node_modules/
+.env
+npm-debug.log
+uploads/
+backups/
+# Third-party installer binary - re-downloadable via the link in
+# sql/install-sqlserver.ps1, not something to keep in source control.
+sql/*.exe
+sql/sqlserver-media/
