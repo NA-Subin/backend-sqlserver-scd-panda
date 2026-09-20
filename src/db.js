@@ -14,6 +14,11 @@ const config = {
   database: process.env.MSSQL_DATABASE,
   user: process.env.MSSQL_USER,
   password: process.env.MSSQL_PASSWORD,
+  // mssql's default requestTimeout (15s) is fine for normal CRUD, but a
+  // full admin/import batch - potentially thousands of rows across every
+  // table in one BEGIN TRANSACTION...COMMIT - can legitimately run for
+  // minutes. 10 minutes comfortably covers a full Firebase export re-import.
+  requestTimeout: 10 * 60 * 1000,
   options: {
     encrypt: process.env.MSSQL_ENCRYPT === 'true',
     trustServerCertificate: process.env.MSSQL_TRUST_SERVER_CERTIFICATE !== 'false',
@@ -35,9 +40,47 @@ poolConnect.catch((err) => {
 // Postgres backend), so both identifier and placeholder rewriting below MUST
 // skip over literal spans or they'll corrupt that inlined data instead of
 // just rewriting real SQL syntax.
+// A plain linear scan (indexOf-based, no regex) rather than the more
+// obvious `text.split(/('(?:[^']|'')*')/g)` - that regex is correct for
+// small text, but a single string literal here can be well over a megabyte
+// (e.g. depot_gas_stations.Report's full JSON history), and matching a
+// megabyte-scale span with an unbounded alternation quantifier
+// unpredictably breaks down in practice (confirmed against real data: parts
+// of a 1.4MB literal came back on the "outside a literal" side of the
+// split, corrupting the JSON text inside it exactly like the bug this
+// function exists to prevent). indexOf has no such scaling cliff.
 function outsideStringLiterals(text, transform) {
-  const parts = text.split(/('(?:[^']|'')*')/g);
-  return parts.map((part, i) => (i % 2 === 1 ? part : transform(part))).join('');
+  const out = [];
+  const n = text.length;
+  let i = 0;
+  while (i < n) {
+    const quoteStart = text.indexOf("'", i);
+    if (quoteStart === -1) {
+      out.push(transform(text.slice(i)));
+      break;
+    }
+    out.push(transform(text.slice(i, quoteStart)));
+
+    // Scan the literal itself, treating '' as an escaped quote that doesn't
+    // end it - copied through untouched, whatever its length.
+    let j = quoteStart + 1;
+    for (;;) {
+      const nextQuote = text.indexOf("'", j);
+      if (nextQuote === -1) {
+        j = n; // unterminated literal - shouldn't happen for well-formed SQL
+        break;
+      }
+      if (text[nextQuote + 1] === "'") {
+        j = nextQuote + 2;
+        continue;
+      }
+      j = nextQuote + 1; // include the closing quote
+      break;
+    }
+    out.push(text.slice(quoteStart, j));
+    i = j;
+  }
+  return out.join('');
 }
 
 // Every identifier this codebase quotes is a plain alphanumeric/underscore

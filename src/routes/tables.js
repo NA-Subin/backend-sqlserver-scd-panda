@@ -71,7 +71,15 @@ export const tablesRoutes = new Elysia()
   .get('/api/:table', async ({ params: { table }, headers }) => {
     requireAuth(headers);
     assertValidTable(table);
-    const { rows } = await pool.query(`SELECT ${selectColumnsSql(table)} FROM "${table}"`);
+    // ORDER BY row_key (the original Firebase key, identical text on every
+    // import regardless of database engine) - a plain unordered SELECT has
+    // no guaranteed row order, and gave a different default order than the
+    // Postgres backend for the exact same underlying data (confirmed: same
+    // 81 rows, different default first-page order). uuid/id aren't safe
+    // substitutes here - uuid is freshly random per import, and id
+    // legitimately repeats (0) across many rows on transaction-shaped
+    // tables (tickets/order/trip).
+    const { rows } = await pool.query(`SELECT ${selectColumnsSql(table)} FROM "${table}" ORDER BY "row_key" ASC`);
     const keyed = rowsToKeyedObject(rows.map((row) => parseJsonColumns(table, row)));
     for (const uuid of Object.keys(keyed)) keyed[uuid] = redactPassword(table, keyed[uuid]);
     return keyed;
